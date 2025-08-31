@@ -131,17 +131,17 @@ Choose this option if you want to maintain a high bar of security over custodial
 
 ```typescript
 import { wordlist } from "@scure/bip39/wordlists/english";
-import { generateMnemonic } from "@scure/bip39";
+import { generateMnemonic, entropyToMnemonic } from "@scure/bip39";
 import { Ed25519KeyIdentity } from "@dfinity/identity";
 import { mnemonicToAccount } from "viem/accounts";
 import { bytesToHex, sha256, toBytes } from "viem";
-import * as bip39 from "bip39";
-import { mnemonicToSeedSync } from "@scure/bip39";
+import { mnemonicToSeed } from "@scure/bip39";
 import {
   IRequestGenerateCryptoIdentity,
   IDPrefixEnum,
   UserID,
 } from "@officexapp/types";
+import { derivePath } from "ed25519-hd-key";
 
 export const generateCryptoIdentity = async (
   args: IRequestGenerateCryptoIdentity
@@ -169,7 +169,7 @@ export const generateCryptoIdentity = async (
       evm_private_key: wallets.evm_private_key,
       origin: {
         secret_entropy,
-        seed_phrase,
+        seed_phrase: seed,
       },
     };
 
@@ -197,7 +197,7 @@ export const generateCryptoIdentity = async (
       evm_private_key: wallets.evm_private_key,
       origin: {
         secret_entropy,
-        seed_phrase,
+        seed_phrase: seed,
       },
     };
     return cryptoIdentity;
@@ -205,32 +205,22 @@ export const generateCryptoIdentity = async (
     throw new Error("Invalid arguments");
   }
 };
-
 // Helper function to generate a random seed phrase
 const generateRandomSeed = (): string => {
   // return (generate(12) as string[]).join(" ");
   return generateMnemonic(wordlist, 128);
 };
-
 const seed_phrase_to_wallet_addresses = async (seedPhrase: string) => {
   try {
-    // For EVM address generation
     const evmAccount = mnemonicToAccount(seedPhrase);
     const evmAddress = evmAccount.address;
-
-    const derivedKey = await deriveEd25519KeyFromSeed(
-      mnemonicToSeedSync(seedPhrase || "")
-    );
-    // Create the identity from the derived key
-    // @ts-ignore
-    const identity = Ed25519KeyIdentity.fromSecretKey(derivedKey);
-
-    // Get the principal using the identity's getPrincipal method
+    const keySpecificSeed64 = await mnemonicToSeed(seedPhrase);
+    const seedHex = bytesToHex(keySpecificSeed64).slice(2);
+    const { key } = derivePath("m/44'/223'/0'/0'/0'", seedHex);
+    const identity = Ed25519KeyIdentity.fromSecretKey(key);
     const principal = identity.getPrincipal();
-    const principalStr = principal.toString();
-
     return {
-      icp_principal: principalStr,
+      icp_principal: principal.toString(),
       evm_public_address: evmAddress,
       // @ts-ignore
       evm_private_key: bytesToHex(evmAccount.getHdKey().privateKey),
@@ -241,29 +231,13 @@ const seed_phrase_to_wallet_addresses = async (seedPhrase: string) => {
     throw error;
   }
 };
-
 const passwordToSeedPhrase = (password: string) => {
-  // 1. Generate a deterministic hash (entropy) from the password.
   const passwordBytes = new TextEncoder().encode(password);
-
-  // The sha256 function from viem returns a hex string.
   const entropyHex = sha256(passwordBytes);
-
-  // 2. Convert the hex string to a Uint8Array using viem's toBytes function.
   const entropyBytes = toBytes(entropyHex);
-
-  // 3. Use bip39.entropyToMnemonic to convert the entropy into a mnemonic.
-  // The library expects a Buffer, so we need to convert our Uint8Array.
-  return bip39.entropyToMnemonic(Buffer.from(entropyBytes), wordlist);
+  return entropyToMnemonic(entropyBytes, wordlist);
 };
 
-// Function to derive Ed25519 key from seed (uses the first 32 bytes of the seed)
-const deriveEd25519KeyFromSeed = async (
-  seed: Uint8Array
-): Promise<Uint8Array> => {
-  const hashBuffer = await crypto.subtle.digest("SHA-256", seed);
-  return new Uint8Array(hashBuffer).slice(0, 32); // Ed25519 secret key should be 32 bytes
-};
 
 ```
 
@@ -303,12 +277,14 @@ Generating a signature can be done by anyone as long as they have the private ke
 
 Pro-Tip: You can create temp auth signatures for a 30 second period in the future by changing the `challenge.timestamp_ms` value. By default, all OfficeX servers only accept a temp auth signature if the timestamp was in the last 30 seconds. If you are self hosting, you can change this [acceptable time window here.](https://github.com/OfficeXApp/typescript-server/blob/79c032cc721b31125d0272d6385b725296565b40/src/services/auth.ts#L183-L188)
 
-<a href="https://codesandbox.io/p/sandbox/generate-crypto-identities-officex-sn95h3" class="button primary" data-icon="terminal">Run in Codepen</a>
+<a href="https://codesandbox.io/p/sandbox/rqkqgh" class="button primary" data-icon="terminal">Run in Codepen</a>
 
 ```typescript
-import { mnemonicToSeedSync } from "@scure/bip39";
+import { mnemonicToSeed, mnemonicToSeedSync } from "@scure/bip39";
 import { Ed25519KeyIdentity } from "@dfinity/identity";
 import { DriveID } from "@officexapp/types";
+import { bytesToHex } from "viem";
+import { derivePath } from "ed25519-hd-key";
 
 /**
  * Derives a 32-byte Ed25519 key from a seed using SHA-256.
@@ -339,10 +315,10 @@ export const generateSignature = async (
   }
 
   try {
-    const derivedKey = await deriveEd25519KeyFromSeed(
-      mnemonicToSeedSync(seedPhrase)
-    );
-    const identity = Ed25519KeyIdentity.fromSecretKey(derivedKey);
+    const keySpecificSeed64 = await mnemonicToSeed(seedPhrase);
+    const seedHex = bytesToHex(keySpecificSeed64).slice(2);
+    const { key } = derivePath("m/44'/223'/0'/0'/0'", seedHex);
+    const identity = Ed25519KeyIdentity.fromSecretKey(key);
 
     const rawPublicKey = identity.getPublicKey().toRaw();
     const publicKeyArray = Array.from(new Uint8Array(rawPublicKey));
@@ -350,7 +326,7 @@ export const generateSignature = async (
     const now = Date.now();
 
     const challenge = {
-      timestamp_ms: now, // this can be changed to future date as well
+      timestamp_ms: now,
       drive_canister_id: driveId,
       self_auth_principal: publicKeyArray,
       canonical_principal: canonicalPrincipal,
